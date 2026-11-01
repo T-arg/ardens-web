@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ardens Player</title>
+</head>
+
+<style>
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+}
+
+#canvas {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    margin: 0px;
+    border: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    display: block;
+    image-rendering: optimizeSpeed;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: -o-crisp-edges;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: optimize-contrast;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+    -ms-interpolation-mode: nearest-neighbor;}
+</style>
+
+<body>
+
+    <canvas id="canvas" tabindex="0" ondrop="dropHandler(event)" ondragover="event.preventDefault()" oncontextmenu="event.preventDefault()"></canvas>
+
+    <script type='text/javascript'>
+        var Module = {
+            canvas: (function() { return document.getElementById('canvas'); })()
+        };
+        
+        Module.canvas.addEventListener("click", (e) => { Module.canvas.focus(); });
+        
+        function loadFile(param, fname, fdata) {
+            var ptr = Module._malloc(fdata.length);
+            Module.HEAPU8.set(fdata, ptr)
+            Module.ccall('load_file', 'number', ['string', 'string', 'number', 'number'], [param, fname, ptr, fdata.length]);
+            Module._free(ptr)
+        }
+        
+        function dropHandler(ev) {
+            ev.preventDefault();
+            [...ev.dataTransfer.files].forEach((f, i) => {
+                
+                var fr = new FileReader();
+                fr.onloadend = evt => {
+                    const fdata = new Uint8Array(evt.target.result);
+                    loadFile('file', f.name, fdata)
+                };
+                fr.readAsArrayBuffer(f);
+                
+                console.log(f);
+            });
+        }
+        
+
+        // ---- Serial bridge --------------------------------------------------
+        // Lets a web page talk to the game over its (simulated) USB serial port.
+        //  * Same page:   window.ardensSerial.write(bytes|string)
+        //                 window.addEventListener('ardens-serial', e => e.detail /* Uint8Array */)
+        //  * Embedded as <iframe>, using postMessage:
+        //      page -> player: { ardens: 'serial-write', data: [..bytes..] | 'text' }
+        //      player -> page: { ardens: 'ready' }
+        //                      { ardens: 'serial-data', data: Uint8Array }
+        function serialWrite(data) {
+            const bytes = (typeof data === 'string') ? new TextEncoder().encode(data) : Uint8Array.from(data);
+            for(let off = 0; off < bytes.length; off += 4096) {
+                const chunk = bytes.subarray(off, off + 4096);
+                const ptr = Module._malloc(chunk.length);
+                Module.HEAPU8.set(chunk, ptr);
+                Module.ccall('serial_write', 'number', ['number', 'number'], [ptr, chunk.length]);
+                Module._free(ptr);
+            }
+        }
+        
+        window.ardensSerial = { write: serialWrite, ready: false };
+        
+        window.addEventListener('message', ev => {
+            const m = ev.data;
+            if(!m || m.ardens !== 'serial-write' || !window.ardensSerial.ready) return;
+            if(typeof m.data === 'string' || Array.isArray(m.data) || m.data instanceof Uint8Array)
+                serialWrite(m.data);
+        });
+        
+        function startSerialBridge() {
+            const SIZE = 4096;
+            const buf = Module._malloc(SIZE);
+            window.ardensSerial.ready = true;
+            setInterval(() => {
+                for(;;) {
+                    const n = Module.ccall('serial_read', 'number', ['number', 'number'], [buf, SIZE]);
+                    if(n <= 0) break;
+                    const data = Module.HEAPU8.slice(buf, buf + n);
+                    window.dispatchEvent(new CustomEvent('ardens-serial', { detail: data }));
+                    if(window.parent !== window)
+                        window.parent.postMessage({ ardens: 'serial-data', data: data }, '*');
+                    if(n < SIZE) break;
+                }
+            }, 8);
+            if(window.parent !== window)
+                window.parent.postMessage({ ardens: 'ready' }, '*');
+        }
+        
+        Module['onRuntimeInitialized'] = function() {
+            startSerialBridge();
+            const url_vars = window.location.search.substring(1).split('&');
+            for(var i = 0; i < url_vars.length; i++) {
+                const p = url_vars[i].split('=');
+                if(p.length != 2) continue;
+                if(Module.ccall('setparam', null, ['string', 'string'], [p[0], p[1]]))
+                    continue;
+                Module.ccall('setparam', null, ['string', 'string'], ['loading', '1'])
+                const param = p[0];
+                const fname = p[1];
+                const fetchURL = 'https://api.combee.net/arduboyGet?url=' + fname;
+                fetch(fetchURL)
+                    .then(rsp => rsp.arrayBuffer())
+                    .then(buf => loadFile(param, fname, new Uint8Array(buf)));
+            }
+        };
+    </script>
+    
+    <script src="ArdensPlayer.js"></script>
+    
+</body>
+
+</html>

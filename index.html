@@ -69,7 +69,56 @@ html, body {
             });
         }
         
+
+        // ---- Serial bridge --------------------------------------------------
+        // Lets a web page talk to the game over its (simulated) USB serial port.
+        //  * Same page:   window.ardensSerial.write(bytes|string)
+        //                 window.addEventListener('ardens-serial', e => e.detail /* Uint8Array */)
+        //  * Embedded as <iframe>, using postMessage:
+        //      page -> player: { ardens: 'serial-write', data: [..bytes..] | 'text' }
+        //      player -> page: { ardens: 'ready' }
+        //                      { ardens: 'serial-data', data: Uint8Array }
+        function serialWrite(data) {
+            const bytes = (typeof data === 'string') ? new TextEncoder().encode(data) : Uint8Array.from(data);
+            for(let off = 0; off < bytes.length; off += 4096) {
+                const chunk = bytes.subarray(off, off + 4096);
+                const ptr = Module._malloc(chunk.length);
+                Module.HEAPU8.set(chunk, ptr);
+                Module.ccall('serial_write', 'number', ['number', 'number'], [ptr, chunk.length]);
+                Module._free(ptr);
+            }
+        }
+        
+        window.ardensSerial = { write: serialWrite, ready: false };
+        
+        window.addEventListener('message', ev => {
+            const m = ev.data;
+            if(!m || m.ardens !== 'serial-write' || !window.ardensSerial.ready) return;
+            if(typeof m.data === 'string' || Array.isArray(m.data) || m.data instanceof Uint8Array)
+                serialWrite(m.data);
+        });
+        
+        function startSerialBridge() {
+            const SIZE = 4096;
+            const buf = Module._malloc(SIZE);
+            window.ardensSerial.ready = true;
+            setInterval(() => {
+                for(;;) {
+                    const n = Module.ccall('serial_read', 'number', ['number', 'number'], [buf, SIZE]);
+                    if(n <= 0) break;
+                    const data = Module.HEAPU8.slice(buf, buf + n);
+                    window.dispatchEvent(new CustomEvent('ardens-serial', { detail: data }));
+                    if(window.parent !== window)
+                        window.parent.postMessage({ ardens: 'serial-data', data: data }, '*');
+                    if(n < SIZE) break;
+                }
+            }, 8);
+            if(window.parent !== window)
+                window.parent.postMessage({ ardens: 'ready' }, '*');
+        }
+        
         Module['onRuntimeInitialized'] = function() {
+            startSerialBridge();
             const url_vars = window.location.search.substring(1).split('&');
             for(var i = 0; i < url_vars.length; i++) {
                 const p = url_vars[i].split('=');
